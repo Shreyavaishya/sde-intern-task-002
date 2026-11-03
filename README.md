@@ -157,30 +157,36 @@ You must understand every line you submit. We check this with your video and in 
 We will run `pnpm install && pnpm check && pnpm typecheck && pnpm test` on your repository.
 
 
-Decisions
-Conditional UPDATE for payments instead of read-then-write. UPDATE shares SET paid_at=?, idempotency_key=? WHERE id=? AND bill_id=? AND paid_at IS NULL is one atomic statement, so when two requests pay the same share at once, exactly one changes a row. The other re-reads the share: the same key means a retry and gets 200 with the stored result, a different key gets 409. No locks and no extra table.
-The database enforces the rules, not only the code. Named constraints (see the table above) mean a bug in a route cannot store a bad amount, a double share or a half-paid share. The code still validates first to give clear error messages.
-Explicit order and atomic bill creation. Every table has an AUTOINCREMENT seq, so "the order members were added" is stored and not guessed from random ids. The bill and all its shares are written in one db.batch() (one transaction). Trade-off: I read the member list and then insert, so a member added in between is not part of that bill. The shares still add up to the total, which I judged safer than adding locking.
+## Decisions
 
-Web: the page marks a share paid only after the server confirms. One payment attempt keeps one Idempotency-Key until it succeeds, so a retry after a timeout cannot pay twice.
+1. **Conditional `UPDATE` for payments instead of read-then-write.** `UPDATE shares SET paid_at=?, idempotency_key=? WHERE id=? AND bill_id=? AND paid_at IS NULL` is one atomic statement, so when two requests pay the same share at once, exactly one changes a row. The other re-reads the share: the same key means a retry and gets `200` with the stored result, a different key gets `409`. No locks and no extra table.
+2. **The database enforces the rules, not only the code.** Named constraints (see the table above) mean a bug in a route cannot store a bad amount, a double share or a half-paid share. The code still validates first to give clear error messages.
+3. **Explicit order and atomic bill creation.** Every table has an `AUTOINCREMENT seq`, so "the order members were added" is stored and not guessed from random ids. The bill and all its shares are written in one `db.batch()` (one transaction). Trade-off: I read the member list and then insert, so a member added in between is not part of that bill. The shares still add up to the total, which I judged safer than adding locking.
 
-Database constraints
-Constraint	What it stops
-bills_total_positive_integer	zero, negative, decimal or text totals
-shares_amount_non_negative_integer	negative or non-integer share amounts
-shares_one_per_member (UNIQUE (bill_id, member_id))	a member getting two shares of one bill
-shares_paid_state_consistent	a share with a paid time but no key, or the reverse
-members_home_fk, bills_home_fk, shares_bill_fk, shares_member_fk	rows that point to something that does not exist
-*_name_not_blank, bills_title_not_blank	empty or whitespace-only names
-*_id_unique	duplicate public ids
-How the cases are handled
-Home with no members: bill creation returns 422.
-Zero, negative or non-whole amount: 422. The check is Number.isSafeInteger(x) && x > 0, so '1000', null and 10.5 are rejected. The database repeats the rule in a CHECK.
-Uneven split: base = floor(total / n), and the first total % n members (in the order they were added) get one extra cent. 1000 cents between 3 members gives 334, 333, 333.
-Same payment sent twice: the key is stored on the share. The same key returns 200 with the same result, and nothing is paid twice.
-Two payments at the same time: one conditional UPDATE ... WHERE paid_at IS NULL. Only one request can change the row. The other re-reads the share and gets 200 (same key) or 409 (different key).
-Missing bill or share: 404. A share is looked up by both its id and its bill id, so it cannot be paid through the wrong bill.
-API error or slow API: the web client times out after 10 seconds and turns every failure into an error message. A share is only shown as paid after the server confirms it.
-AI use
+**Web:** the page marks a share paid only after the server confirms. One payment attempt keeps one `Idempotency-Key` until it succeeds, so a retry after a timeout cannot pay twice.
+
+## Database constraints
+
+| Constraint                                                               | What it stops                                       |
+| ------------------------------------------------------------------------ | --------------------------------------------------- |
+| `bills_total_positive_integer`                                           | zero, negative, decimal or text totals              |
+| `shares_amount_non_negative_integer`                                     | negative or non-integer share amounts               |
+| `shares_one_per_member` (`UNIQUE (bill_id, member_id)`)                  | a member getting two shares of one bill             |
+| `shares_paid_state_consistent`                                           | a share with a paid time but no key, or the reverse |
+| `members_home_fk`, `bills_home_fk`, `shares_bill_fk`, `shares_member_fk` | rows that point to something that does not exist    |
+| `*_name_not_blank`, `bills_title_not_blank`                              | empty or whitespace-only names                      |
+| `*_id_unique`                                                            | duplicate public ids                                |
+
+## How the cases are handled
+
+1. **Home with no members:** bill creation returns `422`.
+2. **Zero, negative or non-whole amount:** `422`. The check is `Number.isSafeInteger(x) && x > 0`, so `'1000'`, `null` and `10.5` are rejected. The database repeats the rule in a `CHECK`.
+3. **Uneven split:** `base = floor(total / n)`, and the first `total % n` members (in the order they were added) get one extra cent. 1000 cents between 3 members gives `334, 333, 333`.
+4. **Same payment sent twice:** the key is stored on the share. The same key returns `200` with the same result, and nothing is paid twice.
+5. **Two payments at the same time:** one conditional `UPDATE ... WHERE paid_at IS NULL`. Only one request can change the row. The other re-reads the share and gets `200` (same key) or `409` (different key).
+6. **Missing bill or share:** `404`. A share is looked up by both its id and its bill id, so it cannot be paid through the wrong bill.
+7. **API error or slow API:** the web client times out after 10 seconds and turns every failure into an error message. A share is only shown as paid after the server confirms it.
+
+## AI use
 
 I used Claude (Anthropic) to read and understand the starter repo, to draft the API, migration, tests and web page, and to prepare for questions about them. I reviewed the code and can explain it.
